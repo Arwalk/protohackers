@@ -21,7 +21,7 @@ defmodule Protohackers do
   @impl true
   def start(_type, _args) do
     children = [
-      {Protohackers.TcpServer, 7000}
+      {Protohackers.TcpServer, {&Protohackers.EchoHandler.handle/1, 7000}}
     ]
     Supervisor.start_link(children, strategy: :one_for_one)
   end
@@ -46,11 +46,37 @@ defmodule Protohackers.EchoHandler do
   end
 end
 
+defmodule Protohackers.HandleRepository do
+  use Agent
+
+  def start_link(handler) do
+    Agent.start_link(fn -> handler end, name: __MODULE__)
+  end
+
+  def handler do
+    Agent.get(__MODULE__, & &1)
+  end
+end
+
 defmodule Protohackers.TcpServer do
   use GenServer
   require Logger
 
-  def start_link(port) do
+  defmodule HandleRepository do
+    use Agent
+
+    def start_link(handler) do
+      Agent.start_link(fn -> handler end, name: __MODULE__)
+    end
+
+    def handler do
+      Agent.get(__MODULE__, & &1)
+    end
+  end
+
+  def start_link(opts) do
+    {handler, port} = opts
+    HandleRepository.start_link(handler)
     GenServer.start_link(__MODULE__, port, name: __MODULE__)
   end
 
@@ -62,7 +88,6 @@ defmodule Protohackers.TcpServer do
     # active: false - we use blocking :gen_tcp.recv (passive mode)
     # reuseaddr: true - allows restarting the server quickly
     opts = [:binary, packet: :raw, active: false, reuseaddr: true]
-
     case :gen_tcp.listen(port, opts) do
       {:ok, listen_socket} ->
         Logger.info("TCP Echo server listening on port #{port}")
@@ -76,10 +101,11 @@ defmodule Protohackers.TcpServer do
 
   @impl true
   def handle_info(:accept, %{listen_socket: listen_socket} = state) do
+    handler = HandleRepository.handler()
     case :gen_tcp.accept(listen_socket) do
       {:ok, client_socket} ->
         # Use a Task to handle the client concurrently
-        Task.start(fn -> Protohackers.EchoHandler.handle(client_socket) end)
+        Task.start(fn -> handler.(client_socket) end)
         # Continue accepting more connections
         send(self(), :accept)
         {:noreply, state}
