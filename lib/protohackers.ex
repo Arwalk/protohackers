@@ -21,7 +21,7 @@ defmodule Protohackers do
   @impl true
   def start(_type, _args) do
     children = [
-      {Protohackers.TcpServer, {&Protohackers.EchoHandler.handle/1, 7000}}
+      {Protohackers.TcpServer, {&Protohackers.EchoHandler.handle/1, :raw, 7000}}
     ]
     Supervisor.start_link(children, strategy: :one_for_one)
   end
@@ -66,18 +66,29 @@ defmodule Protohackers.TcpServer do
     use Agent
 
     def start_link(handler) do
-      Agent.start_link(fn -> handler end, name: __MODULE__)
+      {handle, packet_mode, port} = handler
+      Agent.start_link(fn -> %{} end, name: __MODULE__)
+      Agent.update(__MODULE__, &Map.put(&1, "handle", handle))
+      Agent.update(__MODULE__, &Map.put(&1, "packet", packet_mode))
+      Agent.update(__MODULE__, &Map.put(&1, "port", port))
     end
 
     def handler do
-      Agent.get(__MODULE__, & &1)
+      Agent.get(__MODULE__, &Map.get(&1, "handle"))
+    end
+
+    def packet_option do
+      Agent.get(__MODULE__, &Map.get(&1, "packet"))
+    end
+
+    def port do
+      Agent.get(__MODULE__, &Map.get(&1, "port"))
     end
   end
 
   def start_link(opts) do
-    {handler, port} = opts
-    HandleRepository.start_link(handler)
-    GenServer.start_link(__MODULE__, port, name: __MODULE__)
+    HandleRepository.start_link(opts)
+    GenServer.start_link(__MODULE__, HandleRepository.port(), name: __MODULE__)
   end
 
   @impl true
@@ -87,7 +98,8 @@ defmodule Protohackers.TcpServer do
     # packet: :raw - no special packet framing
     # active: false - we use blocking :gen_tcp.recv (passive mode)
     # reuseaddr: true - allows restarting the server quickly
-    opts = [:binary, packet: :raw, active: false, reuseaddr: true]
+    packet = HandleRepository.packet_option()
+    opts = [:binary, packet: packet, active: false, reuseaddr: true]
     case :gen_tcp.listen(port, opts) do
       {:ok, listen_socket} ->
         Logger.info("TCP Echo server listening on port #{port}")
