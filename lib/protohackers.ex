@@ -21,7 +21,7 @@ defmodule Protohackers do
   @impl true
   def start(_type, _args) do
     children = [
-      {Protohackers.TcpServer, {&Protohackers.EchoHandler.handle/1, :raw, 7000}}
+      {Protohackers.TcpServer, {&Protohackers.PrimeHandler.handle/1, :line, 7000}}
     ]
     Supervisor.start_link(children, strategy: :one_for_one)
   end
@@ -46,15 +46,58 @@ defmodule Protohackers.EchoHandler do
   end
 end
 
-defmodule Protohackers.HandleRepository do
-  use Agent
+defmodule Protohackers.PrimeHandler do
+  require Logger
 
-  def start_link(handler) do
-    Agent.start_link(fn -> handler end, name: __MODULE__)
+  defmodule Query do
+    defstruct method: "wrong", number: ""
   end
 
-  def handler do
-    Agent.get(__MODULE__, & &1)
+  def is_prime(number, _) when rem(number, 2) == 0 do
+    false
+  end
+
+  def is_prime(_, test) when test == 1 or test == 0 do
+    true
+  end
+
+  def is_prime(number, test) do
+    if rem(number, test) == 0 do
+      false
+    else
+      is_prime(number, test - 2)
+    end
+  end
+
+  defp process(data) do
+    case JSON.decode(data) do
+      {:ok, json} when map_size(json) == 2->
+        Logger.debug("Successful decoding #{inspect(json)}")
+        case json do
+           %{"method" => "isPrime", "number"=> number} when is_integer(number) ->
+              %{"method": "isPrime", "prime": is_prime(number, number - 1)}
+           _ -> %{}
+        end
+      {:error, message} ->
+        Logger.debug("Decoding error #{inspect(message)}")
+        %{}
+    end
+  end
+
+  def handle(socket) do
+    case :gen_tcp.recv(socket, 0) do
+      {:ok, data} ->
+        Logger.debug("Received data: #{inspect(data)}")
+        info = process(data)
+        :gen_tcp.send(socket, JSON.encode!(info))
+        handle(socket) # Loop to keep echoing
+      {:error, :closed} ->
+        Logger.info("Client closed connection")
+        :ok
+      {:error, reason} ->
+        Logger.error("TCP error: #{inspect(reason)}")
+        :ok
+    end
   end
 end
 
