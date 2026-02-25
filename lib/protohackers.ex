@@ -49,34 +49,43 @@ end
 defmodule Protohackers.PrimeHandler do
   require Logger
 
-  defmodule Query do
-    defstruct method: "wrong", number: ""
-  end
-
-  def is_prime(number, _) when rem(number, 2) == 0 do
-    false
-  end
-
-  def is_prime(_, test) when test == 1 or test == 0 do
+  def is_prime_impl(n, i) when i * i > abs(n) do
     true
   end
 
-  def is_prime(number, test) do
-    if rem(number, test) == 0 do
-      false
-    else
-      is_prime(number, test - 2)
-    end
+  def is_prime_impl(n, i) when rem(n, i) == 0 do
+    false
+  end
+
+  def is_prime_impl(n, i) do
+    is_prime_impl(n, i + 2)
+  end
+
+  def is_prime(n) when (n <= 2 and n >= 0) or rem(n, 2) == 0 do
+    n == 2
+  end
+
+  def is_prime(n) when n < 0 do
+    false
+  end
+
+  def is_prime(n) do
+    is_prime_impl(n, 3)
   end
 
   defp process(data) do
     case JSON.decode(data) do
-      {:ok, json} when map_size(json) == 2->
+      {:ok, json} ->
         Logger.debug("Successful decoding #{inspect(json)}")
         case json do
            %{"method" => "isPrime", "number"=> number} when is_integer(number) ->
-              %{"method": "isPrime", "prime": is_prime(number, number - 1)}
-           _ -> %{}
+             Logger.debug("Valid number found")
+             %{"method": "isPrime", "prime": is_prime(number)}
+           %{"method" => "isPrime", "number"=> number} when is_float(number) ->
+             %{"method": "isPrime", "prime": false}
+           _ ->
+             Logger.debug("invalid format")
+             %{}
         end
       {:error, message} ->
         Logger.debug("Decoding error #{inspect(message)}")
@@ -85,12 +94,23 @@ defmodule Protohackers.PrimeHandler do
   end
 
   def handle(socket) do
+    handle_internal(socket, "")
+  end
+
+  defp handle_internal(socket, previous) do
     case :gen_tcp.recv(socket, 0) do
       {:ok, data} ->
         Logger.debug("Received data: #{inspect(data)}")
-        info = process(data)
-        :gen_tcp.send(socket, JSON.encode!(info))
-        handle(socket) # Loop to keep echoing
+        data = previous <> data
+        if String.contains?(data, "\n") do
+          info = process(data)
+          Logger.debug("about to send #{inspect(info)}")
+          :gen_tcp.send(socket, JSON.encode!(info))
+          :gen_tcp.send(socket, "\n")
+          handle_internal(socket, "") # Loop to keep echoing
+        else
+          handle_internal(socket, data)
+        end
       {:error, :closed} ->
         Logger.info("Client closed connection")
         :ok
