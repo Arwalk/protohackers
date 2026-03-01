@@ -21,7 +21,7 @@ defmodule Protohackers do
   @impl true
   def start(_type, _args) do
     children = [
-      {Protohackers.TcpServer, {&Protohackers.PrimeHandler.handle/1, :line, 7000}}
+      {Protohackers.TcpServer, {&Protohackers.MeansToAnEnd.handle/1, :raw, 7000}}
     ]
     Supervisor.start_link(children, strategy: :one_for_one)
   end
@@ -46,71 +46,62 @@ defmodule Protohackers.EchoHandler do
   end
 end
 
-defmodule Protohackers.PrimeHandler do
+defmodule Protohackers.MeansToAnEnd do
+  import Bitwise
   require Logger
 
-  def is_prime_impl(n, i) when i * i > abs(n) do
-    true
+  def calc(data) do
+    [a, b, c, d] = data
+    x = <<a::8, b::8, c::8, d::8>>
+    <<v::32-signed>> = x
+    v
   end
 
-  def is_prime_impl(n, i) when rem(n, i) == 0 do
-    false
+  def nth_byte(v, n) do
+    (v &&& (0xFF <<< (n * 8))) >>> (n * 8)
   end
 
-  def is_prime_impl(n, i) do
-    is_prime_impl(n, i + 2)
-  end
-
-  def is_prime(n) when (n <= 2 and n >= 0) or rem(n, 2) == 0 do
-    n == 2
-  end
-
-  def is_prime(n) when n < 0 do
-    false
-  end
-
-  def is_prime(n) do
-    is_prime_impl(n, 3)
-  end
-
-  defp process(data) do
-    case JSON.decode(data) do
-      {:ok, json} ->
-        Logger.debug("Successful decoding #{inspect(json)}")
-        case json do
-           %{"method" => "isPrime", "number"=> number} when is_integer(number) ->
-             Logger.debug("Valid number found")
-             %{"method": "isPrime", "prime": is_prime(number)}
-           %{"method" => "isPrime", "number"=> number} when is_float(number) ->
-             %{"method": "isPrime", "prime": false}
-           _ ->
-             Logger.debug("invalid format")
-             %{}
+  def processorTask(socket, memory, value) do
+    case value do
+      [0x49 | tail] ->
+        {timestamp, value} = Enum.split(tail, 4)
+        {timestamp, value} = {calc(timestamp), calc(value)}
+        [{timestamp, value}] ++ memory
+      [0x51 | tail ] ->
+        {begin, ending} = Enum.split(tail, 4)
+        {begin, ending} = {calc(begin), calc(ending)}
+        case {begin, ending} do
+          {begin, ending} when begin > ending ->
+            :gen_tcp.send(socket, [0, 0, 0, 0])
+            memory
+          {begin, ending} ->
+            {v, count, sign} = Enum.reduce(memory, {0, 0, 1}, fn {timestamp, value}, {v, count, sign} ->
+              case {timestamp, value} do
+                {timestamp, value} when (timestamp >= begin and timestamp <= ending) -> {(v + value), count + 1, sign}
+                {_, _} -> {v, count, sign}
+              end
+            end)
+            Logger.debug("query: #{inspect(self())} {v, count, sign} = #{inspect({v, count, sign})}")
+            case count do
+              0 ->
+                :gen_tcp.send(socket, [0, 0, 0, 0])
+              count ->
+                result = div(v * sign, count)
+                <<a::8, b::8, c::8, d::8>> = <<result::32-signed>>
+                mapped = [a, b, c, d]
+                Logger.debug("query: #{inspect(self())} {result, mapped} = #{inspect({result, mapped})}")
+                :gen_tcp.send(socket, mapped)
+            end
+            memory
         end
-      {:error, message} ->
-        Logger.debug("Decoding error #{inspect(message)}")
-        %{}
     end
   end
 
-  def handle(socket) do
-    handle_internal(socket, "")
-  end
-
-  defp handle_internal(socket, previous) do
-    case :gen_tcp.recv(socket, 0) do
+  def process(socket, previous, memory) do
+    case :gen_tcp.recv(socket, 9) do
       {:ok, data} ->
-        Logger.debug("Received data: #{inspect(data)}")
-        data = previous <> data
-        if String.contains?(data, "\n") do
-          info = process(data)
-          Logger.debug("about to send #{inspect(info)}")
-          :gen_tcp.send(socket, JSON.encode!(info))
-          :gen_tcp.send(socket, "\n")
-          handle_internal(socket, "") # Loop to keep echoing
-        else
-          handle_internal(socket, data)
-        end
+        memory = processorTask(socket, memory, data)
+        process(socket, previous, memory)
       {:error, :closed} ->
         Logger.info("Client closed connection")
         :ok
@@ -119,7 +110,86 @@ defmodule Protohackers.PrimeHandler do
         :ok
     end
   end
+
+  def handle(socket) do
+    process(socket, [], [])
+  end
 end
+
+#defmodule Protohackers.PrimeHandler do
+#  require Logger
+#
+#  def is_prime_impl(n, i) when i * i > abs(n) do
+#    true
+#  end
+#
+#  def is_prime_impl(n, i) when rem(n, i) == 0 do
+#    false
+#  end
+#
+#  def is_prime_impl(n, i) do
+#    is_prime_impl(n, i + 2)
+#  end
+#
+#  def is_prime(n) when (n <= 2 and n >= 0) or rem(n, 2) == 0 do
+#    n == 2
+#  end
+#
+#  def is_prime(n) when n < 0 do
+#    false
+#  end
+#
+#  def is_prime(n) do
+#    is_prime_impl(n, 3)
+#  end
+#
+#  defp process(data) do
+#    case JSON.decode(data) do
+#      {:ok, json} ->
+#        Logger.debug("Successful decoding #{inspect(json)}")
+#        case json do
+#           %{"method" => "isPrime", "number"=> number} when is_integer(number) ->
+#             Logger.debug("Valid number found")
+#             %{"method": "isPrime", "prime": is_prime(number)}
+#           %{"method" => "isPrime", "number"=> number} when is_float(number) ->
+#             %{"method": "isPrime", "prime": false}
+#           _ ->
+#             Logger.debug("invalid format")
+#             %{}
+#        end
+#      {:error, message} ->
+#        Logger.debug("Decoding error #{inspect(message)}")
+#        %{}
+#    end
+#  end
+#
+#  def handle(socket) do
+#    handle_internal(socket, "")
+#  end
+#
+#  defp handle_internal(socket, previous) do
+#    case :gen_tcp.recv(socket, 0) do
+#      {:ok, data} ->
+#        Logger.debug("Received data: #{inspect(data)}")
+#        data = previous <> data
+#        if String.contains?(data, "\n") do
+#          info = process(data)
+#          Logger.debug("about to send #{inspect(info)}")
+#          :gen_tcp.send(socket, JSON.encode!(info))
+#          :gen_tcp.send(socket, "\n")
+#          handle_internal(socket, "") # Loop to keep echoing
+#        else
+#          handle_internal(socket, data)
+#        end
+#      {:error, :closed} ->
+#        Logger.info("Client closed connection")
+#        :ok
+#      {:error, reason} ->
+#        Logger.error("TCP error: #{inspect(reason)}")
+#        :ok
+#    end
+#  end
+#end
 
 defmodule Protohackers.TcpServer do
   use GenServer
@@ -162,7 +232,7 @@ defmodule Protohackers.TcpServer do
     # active: false - we use blocking :gen_tcp.recv (passive mode)
     # reuseaddr: true - allows restarting the server quickly
     packet = HandleRepository.packet_option()
-    opts = [:binary, packet: packet, active: false, reuseaddr: true]
+    opts = [:list, packet: packet, active: false, reuseaddr: true, packet_size: 9]
     case :gen_tcp.listen(port, opts) do
       {:ok, listen_socket} ->
         Logger.info("TCP Echo server listening on port #{port}")
